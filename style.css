@@ -1,0 +1,154 @@
+/* ============ 好感度状态栏 Affection Meter ============ */
+
+/* 浮动开关按钮（手机右下角） */
+#aff-meter-fab {
+  position: fixed;
+  right: 12px;
+  bottom: 64px;
+  z-index: 99999;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #e86a8a, #b03a5b);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  border: none;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#aff-meter-fab:active { transform: scale(0.92); }
+
+/* 状态栏面板 */
+#aff-meter-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 118px;
+  z-index: 99998;
+  width: min(320px, 92vw);
+  max-height: 55vh;
+  overflow-y: auto;
+  background: var(--white30, rgba(30, 30, 40, 0.96));
+  border: 1px solid var(--SmartThemeBorderColor, #555);
+  border-radius: 14px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  padding: 10px 12px;
+  display: none;
+  backdrop-filter: blur(6px);
+  -webkit-overflow-scrolling: touch;
+}
+#aff-meter-panel.open { display: block; }
+#aff-meter-panel::-webkit-scrollbar { width: 4px; }
+
+#aff-meter-panel .aff-title {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--SmartThemeBodyColor, #eee);
+}
+#aff-meter-panel .aff-title small {
+  font-weight: 400;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* 单条好感度 */
+.aff-row {
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  background: var(--black30, rgba(0, 0, 0, 0.22));
+  border-radius: 10px;
+}
+.aff-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+.aff-names { font-weight: 600; color: var(--SmartThemeBodyColor, #eee); }
+.aff-names .aff-arrow { opacity: 0.55; margin: 0 4px; font-size: 11px; }
+.aff-val { font-weight: 700; color: #f0a0b8; font-size: 13px; }
+
+.aff-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+  margin-bottom: 5px;
+}
+.aff-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #e86a8a, #ff9db8);
+  transition: width 0.25s ease;
+}
+
+.aff-row-ops {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.aff-btn {
+  min-width: 40px;
+  padding: 3px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--SmartThemeBorderColor, #666);
+  background: var(--black40, rgba(0, 0, 0, 0.3));
+  color: var(--SmartThemeBodyColor, #eee);
+  font-size: 14px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.aff-btn:active { background: var(--black60, rgba(0, 0, 0, 0.5)); }
+.aff-btn.plus { color: #ff9db8; }
+.aff-btn.minus { color: #9db8ff; }
+.aff-level-tag {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-left: 6px;
+}
+
+/* 空状态 */
+.aff-empty {
+  font-size: 12px;
+  opacity: 0.7;
+  padding: 6px 2px;
+  text-align: center;
+}
+
+/* 设置面板内的关系对编辑 */
+.aff-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  font-size: 13px;
+}
+.aff-settings-row input[type="number"] {
+  width: 64px;
+}
+.aff-settings-row select {
+  max-width: 110px;
+}
+.aff-settings-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.aff-settings-note {
+  font-size: 11px;
+  opacity: 0.65;
+  margin-top: 6px;
+  line-height: 1.5;
+}
