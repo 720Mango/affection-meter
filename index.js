@@ -1,46 +1,32 @@
-/**
- * ============================================================
- *  好感度状态栏 Affection Meter  v1.0.0
- *  SillyTavern UI Extension
- *  ------------------------------------------------------------
- *  混合模式：
- *   1) 自动判定 —— 正文标记法。注入好感度状态提示词，LLM 在
- *      回复末尾输出 {{AFF|A→B:+5,C→D:-2}}，插件解析后累加，
- *      并把标记从聊天记录中剥离（不污染正文、不额外烧 API）。
- *   2) 手动微调 —— 状态栏每条关系带 +/- 按钮。
- *  手机端适配：右下角浮动按钮 + 可折叠面板。
- *  数据：好感度数值存对话级 chatMetadata，关系对定义存全局设置。
- * ============================================================
- */
-
 const context = SillyTavern.getContext();
 const { eventSource, event_types } = context;
 
 const MODULE = 'affection_meter';
 
-/** 匹配正文末尾的好感度标记：{{AFF|名字→名字:+5,名字→名字:-2}} */
 const AFF_RE = /\{\{AFF\|([^}]*)\}\}\s*$/;
-/** 匹配标记内单个条目：名字→名字:+5 或 名字→名字:-3 */
 const ITEM_RE = /^\s*(.+?)\s*:\s*([+-]?\d+)\s*$/;
 
-/* ==================== 默认配置 ==================== */
-
 const DEFAULT_SETTINGS = {
-    autoEnabled: true,          // 自动判定（正文标记法）
-    injectEnabled: true,        // 注入好感度状态到 prompt
-    manualStep: 5,              // 手动 +/- 步长
-    maxValue: 100,              // 好感度上限
+    autoEnabled: true,
+    injectEnabled: true,
+    manualStep: 5,
+    maxValue: 100,
+    charDisplay: '',
+    showSideBtn: true,
+    dynamicActive: true,
+    activeLookback: 6,
+    ignored: [],
+    rulesText: '当一方对另一方好感度低于20时，态度疏离冷淡，保持距离；20-40礼貌但拘谨；40-60自然熟络，开始主动关心；60-80亲密无间，会吃醋会撒娇；80以上毫无保留，身心交付。',
     levelRanges: [
-        { max: 20, label: '陌生',   desc: '彼此还很生疏，客套而疏离。' },
-        { max: 40, label: '冷淡',   desc: '有些熟悉，但仍保持距离。' },
-        { max: 60, label: '熟络',   desc: '相处自然，有来有往。' },
-        { max: 80, label: '亲近',   desc: '关系亲密，会互相关心。' },
-        { max: 100, label: '沦陷',  desc: '全身心交付，无法抗拒。' },
+        { max: 20, label: '陌生', desc: '彼此还很生疏，客套而疏离。' },
+        { max: 40, label: '冷淡', desc: '有些熟悉，但仍保持距离。' },
+        { max: 60, label: '熟络', desc: '相处自然，有来有往。' },
+        { max: 80, label: '亲近', desc: '关系亲密，会互相关心。' },
+        { max: 100, label: '沦陷', desc: '全身心交付，无法抗拒。' },
     ],
-    /** 关系对定义：a/b 取值 char | user | npc:名字 */
     pairDefs: [
-        { id: 'char->user', a: 'char', b: 'user', init: 50 },
-        { id: 'user->char', a: 'user', b: 'char', init: 50 },
+        { id: 'char->user', a: 'char', b: 'user', init: 0 },
+        { id: 'user->char', a: 'user', b: 'char', init: 0 },
     ],
 };
 
@@ -55,24 +41,21 @@ function getSettings() {
     return s;
 }
 
-/* ==================== 对话级数据 ==================== */
-
 function getChatData() {
     if (!context.chatMetadata[MODULE]) {
         const s = getSettings();
         const pairs = {};
         for (const def of s.pairDefs) {
-            pairs[def.id] = { value: clamp(def.init ?? 50, 0, s.maxValue) };
+            pairs[def.id] = { value: clamp(def.init ?? 0, 0, s.maxValue) };
         }
-        context.chatMetadata[MODULE] = { version: 1, pairs };
+        context.chatMetadata[MODULE] = { version: 2, pairs };
     } else {
-        // 补建设置中新增、但当前对话还没有的关系对
         const s = getSettings();
         const data = context.chatMetadata[MODULE];
         if (!data.pairs) data.pairs = {};
         for (const def of s.pairDefs) {
             if (!data.pairs[def.id]) {
-                data.pairs[def.id] = { value: clamp(def.init ?? 50, 0, s.maxValue) };
+                data.pairs[def.id] = { value: clamp(def.init ?? 0, 0, s.maxValue) };
             }
         }
     }
@@ -89,10 +72,10 @@ function clamp(v, min, max) {
     return Math.max(min, Math.min(max, v));
 }
 
-/* ==================== 名称解析 ==================== */
-
 function resolveName(type) {
     if (type === 'char') {
+        const s = getSettings();
+        if (s.charDisplay && s.charDisplay.trim()) return s.charDisplay.trim();
         const ch = context.characters && context.characters[context.characterId];
         return (ch && ch.name) || '角色';
     }
@@ -105,6 +88,34 @@ function resolveName(type) {
     return type || '?';
 }
 
+function typeFromName(name) {
+    const s = getSettings();
+    const n = String(name).trim();
+    if (s.charDisplay && s.charDisplay.trim() && n === s.charDisplay.trim()) return 'char';
+    const ch = context.characters && context.characters[context.characterId];
+    if (ch && ch.name === n) return 'char';
+    if (context.name2 && context.name2 === n) return 'user';
+    return `npc:${n}`;
+}
+
+function normalizeType(t) {
+    if (t === 'char' || t === 'user') return t;
+    return `npc:${String(t).replace(/^npc:/, '')}`;
+}
+
+function isIgnoredName(name) {
+    const s = getSettings();
+    const n = String(name).trim().replace(/^npc:/, '');
+    if (!n) return false;
+    return (s.ignored || []).some(x => String(x).trim() === n);
+}
+
+function genPairId(existing) {
+    let n = existing.length + 1;
+    while (existing.some(d => d.id === `pair${n}`)) n++;
+    return `pair${n}`;
+}
+
 function getLevelInfo(value) {
     const s = getSettings();
     for (const r of s.levelRanges) {
@@ -112,8 +123,6 @@ function getLevelInfo(value) {
     }
     return s.levelRanges[s.levelRanges.length - 1] || { label: '?', desc: '' };
 }
-
-/* ==================== Prompt 注入 ==================== */
 
 function buildPromptText() {
     const s = getSettings();
@@ -129,63 +138,90 @@ function buildPromptText() {
         const lv = getLevelInfo(pair.value);
         lines.push(`- ${aName} → ${bName}：${pair.value}/${s.maxValue}（${lv.label}：${lv.desc}）`);
     }
+    if (s.rulesText && s.rulesText.trim()) {
+        lines.push('');
+        lines.push('【好感度变化规则】');
+        lines.push(s.rulesText.trim());
+    }
+    const ign = (s.ignored || []).filter(Boolean);
+    if (ign.length) {
+        lines.push('');
+        lines.push(`以下角色/关系的好感度【不维护】，不要在标记中提及：${ign.join('、')}`);
+    }
     lines.push('');
-    lines.push(`若某段剧情使好感度发生明显变化，请在回复【正文末尾】附加一行标记（如无变化则省略）：`);
-    lines.push(`{{AFF|角色A→角色B:+5,角色C→角色D:-3}}`);
-    lines.push('用角色名替换 A/B，数值为变化量。该标记仅供系统读取，不要写进剧情正文。');
+    lines.push('若某段剧情使好感度发生明显变化，请在回复【正文末尾】附加一行标记（如无变化则省略）：');
+    lines.push('{{AFF|角色A→角色B:+5,角色C→角色D:-3}}');
+    lines.push('数值前带 + 或 - 表示增减；不带符号表示直接设定为该值（首次建立关系时可按人设设定初始好感，如青梅竹马可直接设定较高值）。');
+    lines.push('只可为【本段正文中实际互动过】的双方写标记。用角色名替换 A/B。该标记仅供系统读取，不要写进剧情正文。');
     return lines.join('\n');
 }
 
 function updateInjection() {
     const s = getSettings();
     if (!s.injectEnabled) {
-        // 清空注入
         context.setExtensionPrompt(MODULE, [], 0, 0);
         return;
     }
     const text = buildPromptText();
-    // position=2 表示 at_system（注入到系统区，LLM 最先读到）
     context.setExtensionPrompt(MODULE, [{ role: 'system', content: text }], 2, 0);
 }
 
-/* ==================== 自动判定：解析正文标记 ==================== */
-
-function findPairByKey(key) {
+function findOrCreatePair(key) {
     const s = getSettings();
     const data = getChatData();
-    // 1) 直接命中 id
     if (data.pairs[key]) return { id: key, def: s.pairDefs.find(d => d.id === key) };
-    // 2) 命中显示名 "A→B"
     for (const def of s.pairDefs) {
         const display = `${resolveName(def.a)}→${resolveName(def.b)}`;
         if (display === key) return { id: def.id, def };
     }
+    const names = key.split('→');
+    if (names.length === 2) {
+        const aName = names[0].trim();
+        const bName = names[1].trim();
+        if (isIgnoredName(aName) || isIgnoredName(bName)) return null;
+        const a = typeFromName(aName);
+        const b = typeFromName(bName);
+        const id = `${normalizeType(a)}->${normalizeType(b)}`;
+        if (!data.pairs[id]) {
+            s.pairDefs.push({ id, a, b, init: 0 });
+            data.pairs[id] = { value: 0, lastRound: (context.chat || []).length };
+            return { id, def: s.pairDefs[s.pairDefs.length - 1] };
+        }
+        return { id, def: s.pairDefs.find(d => d.id === id) };
+    }
     return null;
 }
 
-/** 解析并应用标记，返回是否发生了更新 */
 function parseAndApply(mes) {
     const m = String(mes || '').match(AFF_RE);
     if (!m) return false;
     const s = getSettings();
     const data = getChatData();
     let changed = false;
+    let pairDefsChanged = false;
+    const curRound = (context.chat || []).length;
     for (const part of m[1].split(',')) {
         const mm = part.match(ITEM_RE);
         if (!mm) continue;
-        const hit = findPairByKey(mm[1].trim());
+        const hit = findOrCreatePair(mm[1].trim());
         if (!hit) continue;
-        const delta = parseInt(mm[2], 10);
-        if (isNaN(delta)) continue;
+        const raw = mm[2];
+        const isAbs = !/^[+-]/.test(raw);
+        const num = parseInt(raw, 10);
+        if (isNaN(num)) continue;
         const pair = data.pairs[hit.id];
         const old = pair.value;
-        pair.value = clamp(old + delta, 0, s.maxValue);
+        pair.value = isAbs ? clamp(num, 0, s.maxValue) : clamp(old + num, 0, s.maxValue);
+        pair.lastRound = curRound;
         if (pair.value !== old) changed = true;
+        if (!hit.def) pairDefsChanged = true;
+    }
+    if (pairDefsChanged) {
+        context.saveSettingsDebounced();
     }
     return changed;
 }
 
-/** 生成完成后：解析并剥离标记 */
 function onMessageReceived() {
     const s = getSettings();
     if (!s.autoEnabled) return;
@@ -195,39 +231,64 @@ function onMessageReceived() {
     const mes = msg.mes || '';
     if (!AFF_RE.test(mes)) return;
     const changed = parseAndApply(mes);
-    // 从聊天记录中剥离标记（消息尚未渲染，直接改 mes 即可）
     msg.mes = mes.replace(AFF_RE, '');
     if (changed) {
         saveChat();
         renderPanel();
     }
+    setTimeout(renderInlineBars, 0);
 }
-
-/* ==================== UI：状态栏 ==================== */
 
 let panelRendered = false;
 
+function removeEntry() {
+    const b = document.getElementById('aff-meter-side-btn');
+    if (b) b.remove();
+    const f = document.getElementById('aff-meter-fab');
+    if (f) f.remove();
+}
+
+function togglePanel() {
+    const panel = document.getElementById('aff-meter-panel');
+    if (!panel) return;
+    panel.classList.toggle('open');
+    if (panel.classList.contains('open')) renderPanel();
+}
+
 function buildFabAndPanel() {
-    if (panelRendered) return;
-    panelRendered = true;
+    const s = getSettings();
+    if (!panelRendered) {
+        const panel = document.createElement('div');
+        panel.id = 'aff-meter-panel';
+        document.body.appendChild(panel);
+        panelRendered = true;
+    }
+    removeEntry();
+    if (!s.showSideBtn) return;
+    const sideScroll = document.getElementById('side_scroll');
+    if (sideScroll) {
+        const sideBtn = document.createElement('div');
+        sideBtn.id = 'aff-meter-side-btn';
+        sideBtn.className = 'extension_icon';
+        sideBtn.title = '好感度状态栏';
+        sideBtn.setAttribute('data-i18n', '好感度状态栏');
+        sideBtn.innerHTML = '<i class="fa-solid fa-heart"></i>';
+        sideBtn.addEventListener('click', togglePanel);
+        sideScroll.appendChild(sideBtn);
+    } else {
+        const fab = document.createElement('div');
+        fab.id = 'aff-meter-fab';
+        fab.title = '好感度状态栏';
+        fab.textContent = '♡';
+        fab.addEventListener('click', togglePanel);
+        document.body.appendChild(fab);
+    }
+}
 
-    const fab = document.createElement('div');
-    fab.id = 'aff-meter-fab';
-    fab.title = '好感度状态栏';
-    fab.textContent = '♡';
-    fab.addEventListener('click', () => {
-        const panel = document.getElementById('aff-meter-panel');
-        if (panel) {
-            panel.classList.toggle('open');
-            if (panel.classList.contains('open')) renderPanel();
-        }
-    });
-
-    const panel = document.createElement('div');
-    panel.id = 'aff-meter-panel';
-
-    document.body.appendChild(fab);
-    document.body.appendChild(panel);
+function heartsHtml(value, max) {
+    const filled = Math.max(1, Math.round((value / max) * 5));
+    const empty = 5 - filled;
+    return '<i class="fa-solid fa-heart"></i>'.repeat(filled) + '<i class="fa-regular fa-heart"></i>'.repeat(empty);
 }
 
 function renderPanel() {
@@ -249,17 +310,17 @@ function renderPanel() {
             const aName = resolveName(def.a);
             const bName = resolveName(def.b);
             const lv = getLevelInfo(pair.value);
-            const pct = Math.round((pair.value / s.maxValue) * 100);
             html += `
             <div class="aff-row" data-pair="${def.id}">
                 <div class="aff-row-head">
                     <span class="aff-names">${escapeHtml(aName)}<span class="aff-arrow">→</span>${escapeHtml(bName)}<span class="aff-level-tag">${lv.label}</span></span>
                     <span class="aff-val">${pair.value}</span>
                 </div>
-                <div class="aff-bar"><div class="aff-bar-fill" style="width:${pct}%"></div></div>
+                <div class="aff-hearts">${heartsHtml(pair.value, s.maxValue)}</div>
+                <div class="aff-desc">${escapeHtml(lv.desc)}</div>
                 <div class="aff-row-ops">
-                    <button class="aff-btn minus" data-act="minus" data-pair="${def.id}">-${s.manualStep}</button>
-                    <button class="aff-btn plus" data-act="plus" data-pair="${def.id}">+${s.manualStep}</button>
+                    <button class="aff-btn minus" data-act="minus" data-pair="${def.id}" title="好感度 -${s.manualStep}（步长在设置面板调）">−</button>
+                    <button class="aff-btn plus" data-act="plus" data-pair="${def.id}" title="好感度 +${s.manualStep}（步长在设置面板调）">+</button>
                 </div>
             </div>`;
         }
@@ -267,7 +328,6 @@ function renderPanel() {
 
     panel.innerHTML = html;
 
-    // 绑定手动调节
     panel.querySelectorAll('.aff-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const pairId = btn.getAttribute('data-pair');
@@ -279,10 +339,80 @@ function renderPanel() {
             if (!pair) return;
             const delta = act === 'plus' ? s2.manualStep : -s2.manualStep;
             pair.value = clamp(pair.value + delta, 0, s2.maxValue);
+            pair.lastRound = (context.chat || []).length;
             saveChat();
             renderPanel();
         });
     });
+}
+
+const inlineRendered = new WeakMap();
+
+function isAlwaysActive(t) {
+    return t === 'char' || t === 'user';
+}
+
+function getActivePairIds() {
+    const s = getSettings();
+    const data = getChatData();
+    const chat = context.chat || [];
+    const look = s.activeLookback || 6;
+    const names = new Set();
+    const recent = chat.slice(-look);
+    for (const m of recent) {
+        if (!m || m.is_system) continue;
+        const text = String(m.mes || '');
+        for (const def of s.pairDefs) {
+            if (text.includes(resolveName(def.a))) names.add(def.a);
+            if (text.includes(resolveName(def.b))) names.add(def.b);
+        }
+    }
+    const activeIds = new Set();
+    const total = chat.length;
+    for (const def of s.pairDefs) {
+        const pair = data.pairs[def.id];
+        if (!pair) continue;
+        const aActive = isAlwaysActive(def.a) || names.has(def.a) || (pair.lastRound != null && total - pair.lastRound <= look);
+        const bActive = isAlwaysActive(def.b) || names.has(def.b) || (pair.lastRound != null && total - pair.lastRound <= look);
+        if (aActive || bActive) activeIds.add(def.id);
+    }
+    return activeIds;
+}
+
+function renderInlineBarForMes(mesEl) {
+    if (!mesEl || inlineRendered.has(mesEl)) return;
+    inlineRendered.set(mesEl, true);
+    if (mesEl.querySelector('.aff-inline')) return;
+    const s = getSettings();
+    const data = getChatData();
+    let defs = s.pairDefs.filter(d => data.pairs[d.id]);
+    if (s.dynamicActive) {
+        const active = getActivePairIds();
+        defs = defs.filter(d => active.has(d.id));
+    }
+    if (!defs.length) return;
+    let html = '<div class="aff-inline">';
+    for (const def of defs) {
+        const pair = data.pairs[def.id];
+        const aName = resolveName(def.a);
+        const bName = resolveName(def.b);
+        const lv = getLevelInfo(pair.value);
+        html += `<span class="aff-inline-item">
+            <span class="aff-inline-names">${escapeHtml(aName)} → ${escapeHtml(bName)}</span>
+            <span class="aff-inline-hearts">${heartsHtml(pair.value, s.maxValue)}</span>
+            <span class="aff-inline-val">${pair.value}</span>
+            <span class="aff-inline-desc">${escapeHtml(lv.desc)}</span>
+        </span>`;
+    }
+    html += '</div>';
+    const anchor = mesEl.querySelector('.mes_text') || mesEl.querySelector('.mes_block') || mesEl;
+    anchor.insertAdjacentHTML('afterend', html);
+}
+
+function renderInlineBars() {
+    const chatEl = document.getElementById('chat');
+    if (!chatEl) return;
+    chatEl.querySelectorAll('.mes').forEach(renderInlineBarForMes);
 }
 
 function escapeHtml(str) {
@@ -291,7 +421,7 @@ function escapeHtml(str) {
     }[c]));
 }
 
-/* ==================== UI：设置面板 ==================== */
+let settingsDrawerOpen = true;
 
 function renderSettings() {
     const s = getSettings();
@@ -303,9 +433,10 @@ function renderSettings() {
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
             <b>好感度状态栏 Affection Meter</b>
+            <small class="aff-meta">v1.1.0 | by Mango & Marvis</small>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
-        <div class="inline-drawer-content">
+        <div class="inline-drawer-content" id="aff-set-content" style="${settingsDrawerOpen ? '' : 'display:none'}">
             <label class="checkbox_label">
                 <input type="checkbox" id="aff-set-auto" ${s.autoEnabled ? 'checked' : ''}>
                 <span>自动判定（LLM 正文标记法）</span>
@@ -313,6 +444,14 @@ function renderSettings() {
             <label class="checkbox_label">
                 <input type="checkbox" id="aff-set-inject" ${s.injectEnabled ? 'checked' : ''}>
                 <span>注入好感度状态到 prompt</span>
+            </label>
+            <label class="checkbox_label">
+                <input type="checkbox" id="aff-set-side" ${s.showSideBtn ? 'checked' : ''}>
+                <span>入口显示在左侧栏</span>
+            </label>
+            <label class="checkbox_label">
+                <input type="checkbox" id="aff-set-dynamic" ${s.dynamicActive ? 'checked' : ''}>
+                <span>动态显示（只显示当前在场角色）</span>
             </label>
             <div class="aff-settings-row">
                 <span>手动步长：</span>
@@ -322,20 +461,28 @@ function renderSettings() {
                 <span>上限：</span>
                 <input type="number" id="aff-set-max" value="${s.maxValue}" min="10" max="1000">
             </div>
+            <div class="aff-settings-row">
+                <span>char 显示名：</span>
+                <input type="text" id="aff-set-char" value="${escapeHtml(s.charDisplay || '')}" placeholder="留空=当前角色卡名，多人卡可填「当前角色」等">
+            </div>
+            <div class="aff-settings-row" style="align-items:flex-start;">
+                <span>好感变化规则：</span>
+                <textarea id="aff-set-rules" rows="3" style="flex:1;min-width:160px;">${escapeHtml(s.rulesText || '')}</textarea>
+            </div>
             <hr>
-            <div><b>关系对（A 对 B 的好感度）</b></div>`;
+            <div><b>关系对（A 对 B 的好感度，新 NPC 默认从 0 开始）</b></div>`;
 
     s.pairDefs.forEach((def, idx) => {
         html += `
             <div class="aff-settings-row">
-                <select data-idx="${idx}" class="aff-set-a">
+                <select data-idx="${idx}" class="aff-set-a" title="${escapeHtml(resolveName(def.a))}">
                     ${typeOptions(def.a)}
                 </select>
                 <span>→</span>
-                <select data-idx="${idx}" class="aff-set-b">
+                <select data-idx="${idx}" class="aff-set-b" title="${escapeHtml(resolveName(def.b))}">
                     ${typeOptions(def.b)}
                 </select>
-                <input type="number" data-idx="${idx}" class="aff-set-init" value="${def.init ?? 50}" min="0" max="${s.maxValue}" title="初始值">
+                <input type="number" data-idx="${idx}" class="aff-set-init" value="${def.init ?? 0}" min="0" max="${s.maxValue}" title="初始值">
                 <button class="aff-btn minus aff-set-del" data-idx="${idx}">删</button>
             </div>`;
     });
@@ -345,24 +492,62 @@ function renderSettings() {
                 <button class="aff-btn plus" id="aff-set-add">+ 添加关系对</button>
                 <button class="aff-btn" id="aff-set-save">保存设置</button>
             </div>
-            <div class="aff-settings-note">
-                类型：char=当前角色，user=你，npc:名字=自定义NPC（可在下拉里选「npc」后输入名字）。
-                添加 NPC：先在下拉选「npc」，保存后可在弹窗/输入框补名字。
-            </div>
+            <hr>`;
+
+    const ign = (s.ignored || []).filter(Boolean);
+    if (ign.length) {
+        html += '<div class="aff-settings-row" style="flex-wrap:wrap;"><b>忽略名单：</b>';
+        ign.forEach((nm, i) => {
+            html += `<span class="aff-ign-item">${escapeHtml(nm)}<button class="aff-btn aff-ign-del" data-ign="${i}">解除</button></span>`;
+        });
+        html += '</div>';
+    } else {
+        html += '<div class="aff-settings-row" style="opacity:.6;">忽略名单：空。删除关系对时自动加入，AI 将不再维护该角色好感。</div>';
+    }
+
+    html += `
         </div>
     </div>`;
 
     container.innerHTML = html;
 
+    const drawer = container.querySelector('.inline-drawer-toggle');
+    if (drawer) {
+        drawer.addEventListener('click', () => {
+            settingsDrawerOpen = !settingsDrawerOpen;
+            const content = container.querySelector('#aff-set-content');
+            if (content) content.style.display = settingsDrawerOpen ? '' : 'none';
+            const icon = drawer.querySelector('.inline-drawer-icon');
+            if (icon) icon.classList.toggle('down', settingsDrawerOpen);
+        });
+    }
+
     container.querySelector('#aff-set-add').addEventListener('click', () => {
-        s.pairDefs.push({ id: genPairId(s.pairDefs), a: 'char', b: 'npc:未命名', init: 50 });
+        s.pairDefs.push({ id: genPairId(s.pairDefs), a: 'char', b: 'npc:未命名', init: 0 });
         renderSettings();
     });
     container.querySelectorAll('.aff-set-del').forEach(btn => {
         btn.addEventListener('click', () => {
             const idx = parseInt(btn.getAttribute('data-idx'), 10);
             if (!isNaN(idx) && idx >= 0 && idx < s.pairDefs.length) {
+                const def = s.pairDefs[idx];
+                for (const t of [def.a, def.b]) {
+                    if (t === 'char' || t === 'user') continue;
+                    const nm = String(t).replace(/^npc:/, '');
+                    if (nm && nm !== '未命名' && !s.ignored.includes(nm)) s.ignored.push(nm);
+                }
                 s.pairDefs.splice(idx, 1);
+                context.saveSettingsDebounced();
+                renderSettings();
+            }
+        });
+    });
+    container.querySelectorAll('.aff-ign-del').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const i = parseInt(btn.getAttribute('data-ign'), 10);
+            if (!isNaN(i) && i >= 0 && i < s.ignored.length) {
+                s.ignored.splice(i, 1);
+                context.saveSettingsDebounced();
                 renderSettings();
             }
         });
@@ -370,8 +555,12 @@ function renderSettings() {
     container.querySelector('#aff-set-save').addEventListener('click', () => {
         s.autoEnabled = container.querySelector('#aff-set-auto').checked;
         s.injectEnabled = container.querySelector('#aff-set-inject').checked;
+        s.showSideBtn = container.querySelector('#aff-set-side').checked;
+        s.dynamicActive = container.querySelector('#aff-set-dynamic').checked;
         s.manualStep = clamp(container.querySelector('#aff-set-step').value || 5, 1, 50);
         s.maxValue = clamp(container.querySelector('#aff-set-max').value || 100, 10, 1000);
+        s.charDisplay = container.querySelector('#aff-set-char').value || '';
+        s.rulesText = container.querySelector('#aff-set-rules').value || '';
 
         container.querySelectorAll('.aff-settings-row').forEach(row => {
             const idx = parseInt(row.querySelector('.aff-set-a').getAttribute('data-idx'), 10);
@@ -379,24 +568,23 @@ function renderSettings() {
             const def = s.pairDefs[idx];
             def.a = row.querySelector('.aff-set-a').value;
             def.b = row.querySelector('.aff-set-b').value;
-            def.init = clamp(row.querySelector('.aff-set-init').value || 50, 0, s.maxValue);
+            def.init = clamp(row.querySelector('.aff-set-init').value || 0, 0, s.maxValue);
             def.id = `${normalizeType(def.a)}->${normalizeType(def.b)}`;
         });
 
         context.saveSettingsDebounced();
-        // 新对话数据补建
         getChatData();
         saveChat();
         updateInjection();
         renderPanel();
-        renderSettings();
+        buildFabAndPanel();
     });
 }
 
 function typeOptions(current) {
     const opts = [
-        ['char', '当前角色'],
-        ['user', '你'],
+        ['char', resolveName('char')],
+        ['user', resolveName('user')],
         ['npc:未命名', 'npc(填名字)'],
     ];
     return opts.map(([v, label]) =>
@@ -404,26 +592,13 @@ function typeOptions(current) {
     ).join('');
 }
 
-function normalizeType(t) {
-    if (t === 'char' || t === 'user') return t;
-    return `npc:${String(t).replace(/^npc:/, '')}`;
-}
-
-function genPairId(existing) {
-    let n = existing.length + 1;
-    while (existing.some(d => d.id === `pair${n}`)) n++;
-    return `pair${n}`;
-}
-
-/* ==================== 事件与初始化 ==================== */
-
 function onChatChanged() {
     renderPanel();
     updateInjection();
+    setTimeout(renderInlineBars, 120);
 }
 
 function onMessageSent() {
-    // 用户发送消息后立即刷新注入，保证本次生成带上最新状态
     updateInjection();
 }
 
@@ -432,10 +607,8 @@ function onGenerationStarted() {
 }
 
 function init() {
-    // 确保设置面板挂载点存在
     const target = document.getElementById('extensions_settings2');
     if (!target) {
-        console.warn('[AffectionMeter] 未找到 #extensions_settings2，稍后重试');
         setTimeout(init, 1500);
         return;
     }
@@ -446,7 +619,6 @@ function init() {
         target.appendChild(root);
     }
 
-    // 初始化默认数据
     getSettings();
     getChatData();
 
@@ -454,13 +626,12 @@ function init() {
     renderSettings();
     renderPanel();
     updateInjection();
+    setTimeout(renderInlineBars, 600);
 
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
     eventSource.on(event_types.MESSAGE_SENT, onMessageSent);
     eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
     eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
-
-    console.log('[AffectionMeter] 好感度状态栏已加载');
 }
 
 if (document.readyState === 'loading') {
